@@ -1,0 +1,5 @@
+/.venv/
+/ref_codes/
+/models/test
+/models/saved_models
+/.DS_Store
