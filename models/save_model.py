@@ -9,9 +9,6 @@ import mlx.nn as nn
 
 from mlx.utils import tree_flatten, tree_unflatten
 
-from mlx_lm.gguf import convert_to_gguf
-from mlx_lm.tuner.dora import DoRAEmbedding, DoRALinear
-from mlx_lm.tuner.lora import LoRAEmbedding, LoRALinear, LoRASwitchLinear
 from mlx_lm.tuner.utils import dequantize, load_adapters
 from mlx_lm.utils import (
     dequantize_model,
@@ -20,7 +17,6 @@ from mlx_lm.utils import (
     quantize_model,
     save_config,
     save_weights,
-    upload_to_hub,
 )
 
 
@@ -109,20 +105,25 @@ def main():
 
     current_path = Path.cwd()
 
-    configs = {'model_name' : hf_path.split("/")[-1]}
+    with open(str(Path(current_path /'template' /'lora_config.yaml')), 'r') as file:
+        configs = yaml.load(file, yaml.SafeLoader)
+    configs['model']= hf_path.split("/")[-1]
 
-
-    model_list_path = str(Path(current_path /'config' /'config.yaml'))
+    model_list_path = str(Path(current_path /'models'/'config' /'config.yaml'))
     with open(model_list_path, 'r') as file:
         model_list = yaml.load(file, yaml.SafeLoader)
-    model_list['models'].append(configs['model_name'])
+    if model_list['models'] == None:
+        model_list['models'] = []
+    if configs['model'] not in model_list['models']:
+        model_list['models'].append(configs['model'])
+    
 
     with open(model_list_path, 'w') as fp:
         yaml.dump(model_list, fp, default_flow_style=False, allow_unicode=True)
     fp.close()
 
 
-    save_path = Path( current_path /'saved_models' /configs['model_name'])
+    save_path = Path( current_path/'models' /'model_repo' /configs['model'])
 
     model_save_path = Path( save_path /'model')
     config_save_path = Path( save_path /'config')
@@ -153,11 +154,11 @@ def main():
     # Check the save path is empty
     mlx_path = Path(model_save_path)
 
-    if mlx_path.exists():
-        raise ValueError(
-            f"Cannot save to the path {mlx_path} as it already exists."
-            " Please delete the file/directory or specify a new path to save to."
-        )
+    #if mlx_path.exists():
+    #    raise ValueError(
+    #        f"Cannot save to the path {mlx_path} as it already exists."
+    #        " Please delete the file/directory or specify a new path to save to."
+    #    )
 
     if args.quantize and dequantize:
         raise ValueError("Choose either quantize or dequantize, not both.")
@@ -184,8 +185,8 @@ def main():
     tokenizer.save_pretrained(mlx_path)
 
     save_config(config, config_path=mlx_path / "config.json")
-    config_save_path.mkdir()
-    adapters_save_path.mkdir()
+    config_save_path.mkdir(parents=True, exist_ok=True)
+    adapters_save_path.mkdir(parents=True, exist_ok=True)
     #configs['dtype'] =  dtype
     configs['q_group_size'] = q_group_size
     configs['q_bits'] = q_bits
@@ -200,3 +201,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# python ./models/save_model.py --model "mlx-community/Llama-3.2-1B-Instruct-bf16"
+#python ./models/save_model.py --model "mlx-community/Josiefied-Qwen3-0.6B-abliterated-v1-bf16"
+#python ./models/save_model.py --model "mlx-community/gemma-3-1b-it-qat-4bit"
