@@ -4,3 +4,11 @@
 /models/model_repo/
 /models/data/
 /.DS_Store
+/template/
+.env
+/front/.*/
+/front/ios/
+/front/android/
+/front/linux/
+/front/macos/
+/front/web/

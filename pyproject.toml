@@ -5,5 +5,15 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "mlx-lm>=0.22.5",
+    "a2a-sdk>=0.2.5",
+    "datasets>=3.5.1",
+    "langchain>=0.3.25",
+    "langchain-community>=0.3.24",
+    "mcp[cli]>=1.9.2",
+    "mlx-lm>=0.24.0",
+    "numpy>=2.2.5",
+    "ollama>=0.4.8",
+    "openai>=1.78.1",
+    "python-dotenv>=1.1.0",
+    "streamlit>=1.46.0",
 ]
