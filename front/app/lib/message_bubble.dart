@@ -3,11 +3,13 @@ import 'package:flutter/material.dart';
 class MessageBubble extends StatefulWidget {
   final bool isUser;
   final String message;
+  final bool isLatestMessage;
 
   const MessageBubble({
     super.key,
     required this.isUser,
     required this.message,
+    required this.isLatestMessage,
   });
 
   @override
@@ -22,25 +24,31 @@ class _MessageBubbleState extends State<MessageBubble> with SingleTickerProvider
   @override
   void initState() {
     super.initState();
-    _animationController = AnimationController(
-      duration: Duration(milliseconds: widget.message.length * 50),
-      vsync: this,
-    );
-    _characterCount = StepTween(begin: 0, end: widget.message.length)
-        .animate(_animationController)
-      ..addStatusListener((status) {
-        if (status == AnimationStatus.completed) {
-          setState(() {
-            _isAnimationComplete = true;
-          });
-        }
-      });
-    _animationController.forward();
+    if (widget.isLatestMessage && !widget.isUser) {
+      _animationController = AnimationController(
+        duration: Duration(milliseconds: widget.message.length * 30),
+        vsync: this,
+      );
+      _characterCount = StepTween(begin: 0, end: widget.message.length)
+          .animate(_animationController)
+        ..addStatusListener((status) {
+          if (status == AnimationStatus.completed) {
+            setState(() {
+              _isAnimationComplete = true;
+            });
+          }
+        });
+      _animationController.forward();
+    } else {
+      _isAnimationComplete = true;
+    }
   }
 
   @override
   void dispose() {
-    _animationController.dispose();
+    if (widget.isLatestMessage && !widget.isUser) {
+      _animationController.dispose();
+    }
     super.dispose();
   }
 

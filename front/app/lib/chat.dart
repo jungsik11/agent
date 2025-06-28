@@ -25,10 +25,12 @@ class ChatMessageList extends StatelessWidget {
       controller: scrollController,
       itemCount: messages.length,
       itemBuilder: (context, index) {
+        final isLatestMessage = index == messages.length - 1 && !messages[index].isUser;
         return MessageBubble(
           key: ValueKey('message_$index'),
           isUser: messages[index].isUser,
           message: messages[index].content,
+          isLatestMessage: isLatestMessage,
         );
       },
     );

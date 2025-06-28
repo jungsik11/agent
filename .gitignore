@@ -1,3 +1,5 @@
+.DS_Store
+.idea/
 /.venv/
 /ref_codes/
 /models/test
@@ -6,9 +8,10 @@
 /.DS_Store
 /template/
 .env
-/front/.*/
-/front/ios/
-/front/android/
-/front/linux/
-/front/macos/
-/front/web/
+/front/app/.*/
+/front/app/ios/
+/front/app/android/
+/front/app/linux/
+/front/app/macos/
+/front/app/web/
+/front/app/windows/

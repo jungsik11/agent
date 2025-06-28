@@ -179,6 +179,8 @@ def main():
 if __name__ == "__main__":
 
     main()
+    
 
 
 
+# python ./models/train_model.py --model /Users/irf/Desktop/SynologyDrive/git/agent/models/model_repo/Josiefied-Qwen3-0.6B-abliterated-v1-bf16 --data /Users/irf/Desktop/SynologyDrive/git/agent/models/data/koVast  --dataset-key messages
