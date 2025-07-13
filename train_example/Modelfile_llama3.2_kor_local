@@ -1,0 +1,4 @@
+FROM ./llama3.2_kor_local.gguf
+PARAMETER stop "<|eot_id|>"
+PARAMETER stop "<|end_of_text|>"
+# 필요에 따라 다른 파라미터를 여기에 추가하세요 (예: PARAMETER temperature 0.7)

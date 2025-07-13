@@ -15,3 +15,14 @@
 /front/app/macos/
 /front/app/web/
 /front/app/windows/
+
+Qwen/Qwen3-0.6B-MLX-4bit
+/data/
+/mlx_pretrain_example/
+/train_example/__pycache__/
+/train_example/llama.cpp/
+/train_example/data/
+/train_example/model/
+/train_example/*.gguf/
+
+/webserver/__pycache__/

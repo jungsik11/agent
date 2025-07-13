@@ -15,5 +15,12 @@ dependencies = [
     "ollama>=0.4.8",
     "openai>=1.78.1",
     "python-dotenv>=1.1.0",
+    "requests>=2.32.3",
+    "scipy>=1.16.0",
+    "sentencepiece>=0.2.0",
     "streamlit>=1.46.0",
+    "tokenizers>=0.21.1",
+    "torch>=2.7.1",
+    "tqdm>=4.67.1",
+    "transformers>=4.51.3",
 ]
