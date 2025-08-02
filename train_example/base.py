@@ -49,17 +49,17 @@ def create_attention_mask(
     if T > 1:
         offset = 0
         window_size = None
-        if cache is not None and cache[0] is not None:
+        # Check if cache is a list/tuple and not empty, and its first element is not None
+        if isinstance(cache, (list, tuple)) and len(cache) > 0 and cache[0] is not None:
             c = cache[0]
             offset = c.offset
             if hasattr(c, "max_size"):
                 window_size = c.max_size
                 offset = min(window_size, offset)
                 return_array = return_array or offset + T > window_size
-        if return_array:
-            return create_causal_mask(T, offset, window_size=window_size)
-        else:
-            return "causal"
+        
+        # Always return a causal mask array, not a string
+        return create_causal_mask(T, offset, window_size=window_size)
     else:
         mask = None
     return mask
@@ -128,6 +128,10 @@ def scaled_dot_product_attention(
             bits=cache.bits,
         )
     else:
-        return mx.fast.scaled_dot_product_attention(
-            queries, keys, values, scale=scale, mask=mask
-        )
+        # Manual implementation for debugging
+        scores = (queries * scale) @ keys.transpose(0, 1, 3, 2)
+        if mask is not None:
+            scores = mx.where(mask, scores, mx.finfo(scores.dtype).min)
+        scores = mx.softmax(scores, axis=-1)
+        output = scores @ values
+        return output

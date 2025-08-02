@@ -5,14 +5,13 @@ import mlx.core as mx
 import sentencepiece as spm
 import os
 from gemma3 import ModelArgs, Model
-from config import GEMMA3_ARGS, DATA_CACHE_DIR, checkpoint_dir as default_checkpoint_dir
 
 def main(args):
     """
     Main function to run the interactive chat.
     """
     print("Loading tokenizer...")
-    tokenizer_model_path = os.path.join(os.path.dirname(__file__), 'data', 'tokenizer.model')
+    tokenizer_model_path = os.path.join(os.path.dirname(args.model_path), 'tokenizer.model')
     if not os.path.exists(tokenizer_model_path):
         print(f"Error: SentencePiece model file not found at {tokenizer_model_path}.")
         print("Please ensure the tokenizer exists. You might need to run prepare_dataset.py first.")
@@ -24,18 +23,8 @@ def main(args):
     print(f"SentencePiece tokenizer loaded. Vocabulary size: {vocab_size}")
 
     print("\nInitializing model...")
-    model_args = ModelArgs(
-        model_type=GEMMA3_ARGS["model_type"],
-        hidden_size=GEMMA3_ARGS["hidden_size"],
-        num_hidden_layers=GEMMA3_ARGS["num_hidden_layers"],
-        intermediate_size=GEMMA3_ARGS["intermediate_size"],
-        num_attention_heads=GEMMA3_ARGS["num_attention_heads"],
-        head_dim=GEMMA3_ARGS["head_dim"],
-        rms_norm_eps=GEMMA3_ARGS["rms_norm_eps"],
-        num_key_value_heads=GEMMA3_ARGS["num_key_value_heads"],
-        rope_traditional=GEMMA3_ARGS["rope_traditional"],
-        vocab_size=vocab_size,
-    )
+    # Use default ModelArgs from gemma3.py, only overriding vocab_size
+    model_args = ModelArgs(vocab_size=vocab_size, model_type='gemma3')
     model = Model(model_args)
 
     print(f"Loading model weights from: {args.model_path}")
@@ -90,11 +79,11 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Interact with a trained GeminiNano model.")
+    parser = argparse.ArgumentParser(description="Interact with a trained Gemma3 model.")
     parser.add_argument(
         "--model_path",
         type=str,
-        default=os.path.join(default_checkpoint_dir, "model.safetensors"),
+        default=os.path.join("./model_gemma3", "model.safetensors"),
         help="Path to the trained model checkpoint (.safetensors file)."
     )
     parser.add_argument(

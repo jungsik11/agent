@@ -24,3 +24,6 @@ dependencies = [
     "tqdm>=4.67.1",
     "transformers>=4.51.3",
 ]
+
+[tool.setuptools.packages.find]
+where = ["."]

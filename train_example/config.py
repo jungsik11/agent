@@ -15,11 +15,11 @@ GEMINI_NANO_ARGS = {
 # Model Args - gemma3
 GEMMA3_ARGS = {
     "model_type": "gemma3",
-    "hidden_size": 2048,
-    "num_hidden_layers": 20,
-    "intermediate_size": 6144,
+    "hidden_size": 1152,
+    "num_hidden_layers": 26,
+    "intermediate_size": 6912,
     "num_attention_heads": 4,
-    "head_dim": 512,
+    "head_dim": 256,
     "rms_norm_eps": 1e-6,
     "num_key_value_heads": 1,
     "rope_traditional": False,

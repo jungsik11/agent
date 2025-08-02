@@ -1,29 +1,40 @@
-# Model: We are training from scratch, so we don't specify a base model.
-# Instead, we will generate one with `mlx_lm.utils.generate_config` implicitly.
-# The trained model will be saved based on the adapter_path.
+# Model configuration
+model_type: "gemma2"
+hidden_size: 2048
+num_hidden_layers: 24
+intermediate_size: 8192
+num_attention_heads: 8
+num_key_value_heads: 4
+rms_norm_eps: 1.0e-6
+vocab_size: 32000
+head_dim: 256
+attn_logit_softmax_capping: 50.0
+attn_logit_softcapping: 50.0
+final_logit_softmax_capping: 30.0
+final_logit_softcapping: 30.0
+rope_theta: 10000.0
 
-# Data: Path to the training and validation data.
-# The data must be in `.jsonl` format, where each line is a JSON object
-# with a "text" key. (e.g. {"text": "..."})
-data: data/
+# Tokenizer path
+tokenizer_path: "tokenizer"
 
-# Model: Path to the model directory with a config.json file.
-model: scratch_model
+# Data configuration
+data: data
+max_seq_length: 512
 
 # Training parameters
 train: true
 fine_tune_type: full # 'full' means pre-training from scratch
-iters: 100 # Number of training iterations
-batch_size: 2
-learning_rate: 1e-4
-max_seq_length: 256
-num_layers: -1 # Use -1 to train all layers in the model
+iters: 2000 # Number of training iterations
+batch_size: 2 # Adjust based on your memory
+learning_rate: 0.00001 # Stable learning rate
+warmup: 200 # Warmup steps to stabilize training early on
+grad_clip: 1.0 # Gradient clipping to prevent explosions
 
 # Saving and Logging
-adapter_path: models/pretrained_model # Path to save the final trained model
-save_every: 50 # Save a checkpoint every 50 iterations
+adapter_path: models/bitnet_pretrained # Path to save the final trained model
+save_every: 10 # Save a checkpoint every 200 iterations
 steps_per_report: 10 # Log training loss every 10 iterations
-steps_per_eval: 50 # No validation set, so this is just for checkpoints
+steps_per_eval: 200 # Evaluate on the validation set every 200 iterations
 
 # Seed for reproducibility
 seed: 42

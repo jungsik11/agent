@@ -1,1 +1,3 @@
 mlx-lm
+datasets
+scikit-learn
