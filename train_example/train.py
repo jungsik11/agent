@@ -29,7 +29,7 @@ def get_args():
                         help="Directory to save/load model and tokenizer.")
     parser.add_argument("--batch-size", type=int, default=8, help="Batch size for training.")
     parser.add_argument("--seq-len", type=int, default=512, help="Sequence length for training.")
-    parser.add_argument("--lr", type=float, default=1e-6, help="Learning rate.") # Further reduced LR
+    parser.add_argument("--lr", type=float, default=5e-6, help="Learning rate.") # Further reduced LR
     parser.add_argument("--epochs", type=int, default=2, help="Number of training epochs.")
     parser.add_argument("--save-every", type=int, default=5, help="Save a checkpoint every N steps.")
     parser.add_argument("--fresh-start", action="store_true", default=True, # Set fresh-start to True by default

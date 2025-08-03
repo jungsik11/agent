@@ -128,7 +128,13 @@ def scaled_dot_product_attention(
             bits=cache.bits,
         )
     else:
-        # Manual implementation for debugging
+        B, n_q_heads, L, D = queries.shape
+        n_kv_heads = keys.shape[1]
+        if n_q_heads != n_kv_heads:
+            n_repeats = n_q_heads // n_kv_heads
+            keys = mx.repeat(keys, n_repeats, axis=1)
+            values = mx.repeat(values, n_repeats, axis=1)
+
         scores = (queries * scale) @ keys.transpose(0, 1, 3, 2)
         if mask is not None:
             scores = mx.where(mask, scores, mx.finfo(scores.dtype).min)

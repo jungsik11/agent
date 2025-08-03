@@ -1,10 +1,46 @@
-
-
 import argparse
 import mlx.core as mx
 import sentencepiece as spm
 import os
+from typing import Any, List, Mapping, Optional
+
+from langchain.llms.base import LLM
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
+
 from gemma3 import ModelArgs, Model
+
+class Gemma3LLM(LLM):
+    model: Any
+    tokenizer: Any
+    model_args: Any
+    temp: float
+    repetition_penalty: float
+
+    @property
+    def _llm_type(self) -> str:
+        return "gemma3"
+
+    def _call(self, prompt: str, stop: Optional[List[str]] = None, **kwargs) -> str:
+        tokens = self.tokenizer.encode_as_ids(prompt)
+        input_ids = mx.array([tokens])
+
+        generated_tokens = []
+        # Max tokens hardcoded for now, can be an arg
+        for token, _ in zip(self.model.generate(input_ids, temp=self.temp, repetition_penalty=self.repetition_penalty), range(150)):
+            token_id = token.item()
+            if token_id == self.tokenizer.eos_id():
+                break
+            generated_tokens.append(token_id)
+
+        return self.tokenizer.decode(generated_tokens)
+
+    @property
+    def _identifying_params(self) -> Mapping[str, Any]:
+        return {
+            "temp": self.temp,
+            "repetition_penalty": self.repetition_penalty,
+        }
 
 def main(args):
     """
@@ -35,47 +71,38 @@ def main(args):
     model.eval()
     print("Model initialized and weights loaded.")
 
+    # Initialize Gemma3LLM
+    llm = Gemma3LLM(
+        model=model,
+        tokenizer=sp_model,
+        model_args=model_args,
+        temp=args.temp,
+        repetition_penalty=args.repetition_penalty,
+    )
+
+    # Define PromptTemplate
+    template = """You are a helpful AI assistant. Answer the following question:
+
+    Question: {query}
+    Answer:"""
+    prompt = PromptTemplate(template=template, input_variables=["query"])
+
+    # Create LLMChain
+    llm_chain = LLMChain(prompt=prompt, llm=llm)
+
     print("\n--- Gemma3 Chat ---")
     print("모델이 준비되었습니다. 질문을 입력하세요.")
-    print("종료하시려면 'exit' 또는 'quit'을 입력하세요.")
     print("--------------------------")
 
-    max_tokens = 150  # Maximum number of tokens to generate
+    query = args.query
+    if not query.strip():
+        print("Error: No query provided.")
+        return
 
-    while True:
-        try:
-            prompt = input("You: ")
-        except EOFError:
-            break
-        if prompt.lower() in ["exit", "quit"]:
-            break
-        if not prompt.strip():
-            continue
+    print("Gemma: ", end="", flush=True)
+    response = llm_chain.run(query)
+    print(response)
 
-        tokens = sp_model.encode_as_ids(prompt)
-        input_ids = mx.array([tokens])
-
-        print("Gemma: ", end="", flush=True)
-        
-        response_tokens = []
-        # The generate function is a generator, yielding one token at a time
-        for token, count in zip(model.generate(input_ids, temp=args.temp, repetition_penalty=args.repetition_penalty), range(max_tokens)):
-            token_id = token.item()
-            
-            # Stop generation if EOS token is produced
-            if token_id == sp_model.eos_id():
-                break
-            
-            response_tokens.append(token_id)
-            
-            # Decode and print the generated text so far
-            # This provides a streaming-like effect
-            current_text = sp_model.decode(response_tokens)
-            # To avoid re-printing the whole text, we can find the new part,
-            # but for simplicity, we'll just overwrite the line.
-            print(f"\rGemma: {current_text}", end="", flush=True)
-
-        print() # Move to the next line after generation is complete
 
 
 if __name__ == "__main__":
@@ -84,20 +111,24 @@ if __name__ == "__main__":
         "--model_path",
         type=str,
         default=os.path.join("./model_gemma3", "model.safetensors"),
-        help="Path to the trained model checkpoint (.safetensors file)."
+        help="Path to the trained model checkpoint (.safetensors file).",
     )
     parser.add_argument(
         "--temp",
         type=float,
         default=0.5,
-        help="The sampling temperature for generation."
+        help="The sampling temperature for generation.",
     )
     parser.add_argument(
         "--repetition_penalty",
         type=float,
         default=1.1,
-        help="The repetition penalty for generation."
+        help="The repetition penalty for generation.",
+    )
+    parser.add_argument(
+        "--query",
+        type=str,
+        help="The query to ask the model.",
     )
     args = parser.parse_args()
     main(args)
-
