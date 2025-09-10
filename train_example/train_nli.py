@@ -4,12 +4,13 @@ import os
 import re
 import shutil
 from dataclasses import dataclass
+import dataclasses
 
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
 import sentencepiece as spm
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk
 from mlx.core import save_safetensors
 from mlx.utils import tree_flatten
 import sys
@@ -35,6 +36,9 @@ def get_args():
                         help="Force training from scratch, ignoring existing checkpoints.")
     parser.add_argument("--max-steps", type=int, default=0, help="Maximum number of training steps. Overrides epochs.")
     parser.add_argument("--num-train-examples", type=int, default=None, help="Number of training examples to use. If None, uses all available.")
+    parser.add_argument("--lr-patience", type=int, default=20, help="Patience in steps for LR scheduler.")
+    parser.add_argument("--lr-factor", type=float, default=0.5, help="Factor to reduce LR by.")
+    parser.add_argument("--min-lr", type=float, default=1e-7, help="Minimum learning rate.")
     return parser.parse_args()
 
 
@@ -70,6 +74,9 @@ def load_dataset_and_preprocess(args, tokenizer, seq_len: int):
     def tokenize_fn(example):
         question = (example.get('question', '') or '').strip()
         answer = (example.get('answer', '') or '').strip()
+
+        # Remove "**Phi:**" prefix from the answer
+        answer = answer.replace('**Phi:**', '').strip()
         
         if not question or not answer:
             return {"input_ids": [], "target_ids": []}
@@ -106,82 +113,88 @@ def load_model_and_state(args, tokenizer):
     """Initialize or load a model and its training state."""
     model_path = os.path.join(args.model_dir, "model.safetensors")
     state_path = os.path.join(args.model_dir, "training_state.json")
-
-    # ModelArgs from gemma3.py
-    # vocab_size is dynamically set from the tokenizer
-    model_args = ModelArgs(vocab_size=tokenizer.get_piece_size(), model_type='gemma3')
-    model = Model(model_args)
-    optimizer = optim.Adam(learning_rate=args.lr)
+    optimizer_path = os.path.join(args.model_dir, "optimizer.npz")
 
     start_epoch = 0
     start_step = 0
+    best_loss = float('inf')
+    last_avg_loss = float('inf')
+    state = {}
 
-    if not args.fresh_start and os.path.exists(model_path):
+    # First, determine the starting step
+    if not args.fresh_start and os.path.exists(model_path) and os.path.exists(state_path):
+        with open(state_path, 'r') as f:
+            state = json.load(f)
+            start_epoch = state.get("epoch", 0)
+            start_step = state.get("step", 0)
+            best_loss = state.get("best_loss", float('inf'))
+            last_avg_loss = state.get("last_avg_loss", float('inf'))
+
+    # Per user request, do not use config.json. Using default ModelArgs from gemma3.py
+    print("Ignoring config.json and using default model arguments.")
+    model_args = ModelArgs(model_type="gemma3", vocab_size=tokenizer.get_piece_size())
+    model = Model(model_args)
+    mx.eval(model.parameters()) # Ensure parameters are initialized
+    optimizer = optim.Adam(learning_rate=args.lr)
+
+    # Load model weights and optimizer state if resuming
+    if start_step > 0:
         print(f"Found existing checkpoint. Loading model from {model_path}...")
         try:
-            raw_weights = mx.load(model_path)
+            # Load model weights
+            weights = mx.load(model_path)
+            weights = model.sanitize(weights)
+            model.update(weights)
 
-            processed_weights = {}
-            if isinstance(raw_weights, dict):
-                for k, v in raw_weights.items():
-                    if not isinstance(v, mx.array):
-                        processed_weights[k] = mx.array(v)
-                    else:
-                        processed_weights[k] = v
-            else:
-                raise TypeError(f"Expected mx.load to return a dict, but got {type(raw_weights)}")
+            # Load optimizer state
+            if os.path.exists(optimizer_path):
+                optimizer.update_from_numpy(str(optimizer_path))
+                print("Optimizer state loaded.")
 
-            sanitized_weights = model.sanitize(processed_weights)
+            # Restore learning rate from state file (can override optimizer state)
+            saved_lr = state.get("lr", args.lr)
+            optimizer.learning_rate = saved_lr
 
-            model_parameters = dict(model.parameters())
-            for k, v in sanitized_weights.items():
-                if k in model_parameters:
-                    model_parameters[k].set(v)
-                elif k.startswith("model.") and k[len("model."):] in model_parameters:
-                    model_parameters[k[len("model."):]].set(v)
-                elif k == "lm_head.weight" and "lm_head.weight" in model_parameters:
-                    model_parameters["lm_head.weight"].set(v)
-                elif k == "model.embed_tokens.weight" and "model.embed_tokens.weight" in model_parameters:
-                    model_parameters["model.embed_tokens.weight"].set(v)
-                elif k == "model.embed_tokens.weight" and "embed_tokens.weight" in model_parameters:
-                    model_parameters["embed_tokens.weight"].set(v)
-                else:
-                    print(f"Warning: Parameter {k} not found in model.")
+            print(f"Resuming training from Epoch {start_epoch + 1}, Step {start_step + 1}")
+            print(f"Restored learning rate to {saved_lr:.6e}")
+            print(f"Restored best loss to {best_loss:.4f}")
+            print(f"Restored last average loss to {last_avg_loss:.4f}")
 
-            if os.path.exists(state_path):
-                with open(state_path, 'r') as f:
-                    state = json.load(f)
-                    start_epoch = state.get("epoch", 0)
-                    start_step = state.get("step", 0)
-                print(f"Resuming training from Epoch {start_epoch + 1}, Step {start_step + 1}")
-            else:
-                print("Warning: Model weights found, but no training state. Starting from beginning of epoch.")
         except Exception as e:
-            print(f"Error loading weights: {e}. Starting from scratch.")
-            start_epoch, start_step = 0, 0
+            print(f"Error loading checkpoint: {e}. Treating as a fresh start.")
+            import traceback
+            print("Full traceback:")
+            traceback.print_exc()
+            start_epoch, start_step = 0, 0 # Reset if weights fail to load
     else:
         print("No checkpoint found or fresh start requested. Initializing new model.")
-
-    mx.eval(model.parameters()) # Ensure parameters are initialized
 
     # Calculate and print model parameter count
     total_params = sum(p.size for _, p in tree_flatten(model.parameters()))
     print(f"Model initialized with approximately {total_params / 1_000_000_000:.2f} Billion parameters.")
 
-    return model, optimizer, start_epoch, start_step
+    return model, optimizer, start_epoch, start_step, best_loss, last_avg_loss
 
 
-def save_checkpoint(model, epoch, step, args):
+def save_checkpoint(model, optimizer, epoch, step, best_loss, last_avg_loss, args):
     """Save model and training state."""
     os.makedirs(args.model_dir, exist_ok=True)
     model_path = os.path.join(args.model_dir, "model.safetensors")
     state_path = os.path.join(args.model_dir, "training_state.json")
+    optimizer_path = os.path.join(args.model_dir, "optimizer.npz")
 
-    print(f"\nSaving checkpoint at Epoch {epoch+1}, Step {step+1}...")
+    print(f"\nSaving checkpoint at Epoch {epoch+1}, Step {step+1} with best_loss {best_loss:.4f}...")
     save_safetensors(model_path, dict(tree_flatten(model.parameters())))
+    mx.savez(optimizer_path, **optimizer.state)
     
     with open(state_path, 'w') as f:
-        json.dump({"epoch": epoch, "step": step}, f)
+        json.dump({
+            "epoch": epoch, 
+            "step": step, 
+            "lr": float(optimizer.learning_rate), 
+            "best_loss": best_loss,
+            "last_avg_loss": last_avg_loss
+        }, f)
     print("Checkpoint saved.")
 
 
@@ -220,7 +233,7 @@ def main():
         print(e)
         return
 
-    model, optimizer, start_epoch, start_step = load_model_and_state(args, tokenizer)
+    model, optimizer, start_epoch, start_step, best_loss, last_avg_loss = load_model_and_state(args, tokenizer)
     dataset = load_dataset_and_preprocess(args, tokenizer, args.seq_len)
     if dataset is None:
         return
@@ -229,76 +242,107 @@ def main():
     if pad_id == -1: pad_id = 0
 
     print("\nStarting training...")
-    
-    # KorQuAD 2.1 has 83,486 training examples.
+
     num_examples = args.num_train_examples if args.num_train_examples is not None else 83486
     num_batches_per_epoch = num_examples // args.batch_size
-    
-    total_steps = args.epochs * num_batches_per_epoch
-    warmup_steps = 100
-    min_lr = 1e-7
 
-    global_step = start_epoch * num_batches_per_epoch + start_step
+    global_step = start_step
+    
+    # Separate loss windows for saving and LR scheduling
+    save_loss_window = []
+    lr_loss_window = []
 
     for epoch in range(start_epoch, args.epochs):
         print(f"Epoch {epoch + 1}/{args.epochs}")
         
-        # Shuffle the dataset for each epoch
-        shuffled_dataset = dataset.shuffle() # Use a buffer for shuffling
-        
-        total_loss = 0
-        
-        pbar = tqdm(total=num_batches_per_epoch, desc=f"Epoch {epoch+1}")
-        
-        # Create an iterator for the shuffled dataset
+        shuffled_dataset = dataset.shuffle()
         batch_iterator = iter(shuffled_dataset.iter(batch_size=args.batch_size))
 
-        for step in range(num_batches_per_epoch):
-            if global_step >= total_steps and args.max_steps == 0:
-                break
+        steps_already_done = 0
+        if epoch == start_epoch and global_step > 0:
+            steps_already_done = global_step % num_batches_per_epoch
+            if steps_already_done > 0:
+                print(f"Resuming from global step {global_step}. Skipping {steps_already_done} batches in this epoch.")
+                for _ in range(steps_already_done):
+                    try:
+                        next(batch_iterator)
+                    except StopIteration:
+                        print("Warning: Reached end of dataset while skipping batches.")
+                        break
+        
+        total_loss = 0
+        pbar = tqdm(initial=steps_already_done, total=num_batches_per_epoch, desc=f"Epoch {epoch+1}")
 
-            # Learning rate scheduling
-            if global_step < warmup_steps:
-                lr = args.lr * (global_step + 1) / warmup_steps
-            else:
-                cycle_steps = num_batches_per_epoch
-                current_step_in_cycle = (global_step - warmup_steps) % cycle_steps
-                progress = current_step_in_cycle / cycle_steps
-                cosine_decay = 0.5 * (1 + mx.cos(mx.pi * progress))
-                lr = min_lr + (args.lr - min_lr) * cosine_decay
-            
-            optimizer.learning_rate = lr
+        for step in range(steps_already_done, num_batches_per_epoch):
+            if args.max_steps and global_step >= args.max_steps:
+                break
 
             try:
                 batch = next(batch_iterator)
                 x = mx.array(batch["input_ids"], dtype=mx.int32)
                 y = mx.array(batch["target_ids"], dtype=mx.int32)
             except StopIteration:
-                break # End of dataset
+                break
 
             loss = train_step(model, optimizer, x, y, pad_id)
             mx.eval(model.parameters(), optimizer.state)
 
-            total_loss += loss.item()
-            pbar.set_postfix(loss=f"{loss.item():.4f}", lr=f"{lr:.6e}")
+            current_loss = loss.item()
+            total_loss += current_loss
+            save_loss_window.append(current_loss)
+            lr_loss_window.append(current_loss)
+
+            pbar.set_postfix(loss=f"{current_loss:.4f}", lr=f"{optimizer.learning_rate:.6e}")
             pbar.update(1)
             global_step += 1
 
-            if (global_step % args.save_every) == 0:
-                save_checkpoint(model, epoch, global_step, args)
-            
+            # Conditional saving block (uses save_every)
+            if (global_step % args.save_every) == 0 and global_step > 0:
+                if save_loss_window:
+                    current_avg_loss = sum(save_loss_window) / len(save_loss_window)
+                    if current_avg_loss < best_loss:
+                        print(f"\nStep {global_step}: Avg loss {current_avg_loss:.4f} is better than best {best_loss:.4f}. Saving checkpoint.")
+                        best_loss = current_avg_loss
+                        save_checkpoint(model, optimizer, epoch, global_step, best_loss, last_avg_loss, args)
+                    else:
+                        print(f"\nStep {global_step}: Avg loss {current_avg_loss:.4f} is not better than best {best_loss:.4f}. Skipping save.")
+                    save_loss_window = [] # Reset window after check
+
+            # Learning rate scheduler block (uses lr_patience)
+            if (global_step % args.lr_patience) == 0 and global_step > 0:
+                if lr_loss_window:
+                    current_lr_avg_loss = sum(lr_loss_window) / len(lr_loss_window)
+                    if current_lr_avg_loss >= last_avg_loss:
+                        current_lr = optimizer.learning_rate
+                        new_lr = current_lr * args.lr_factor
+                        if new_lr >= args.min_lr:
+                            optimizer.learning_rate = new_lr
+                            print(f"\nStep {global_step}: Reducing learning rate from {current_lr:.6e} to {new_lr:.6e}")
+                        else:
+                            optimizer.learning_rate = args.min_lr
+                            print(f"\nStep {global_step}: Learning rate reached minimum of {args.min_lr:.6e}")
+                    last_avg_loss = current_lr_avg_loss
+                    lr_loss_window = [] # Reset window after check
+
             if args.max_steps and global_step >= args.max_steps:
                 break
         
         pbar.close()
-        avg_loss = total_loss / (step + 1)
+        avg_loss = total_loss / (step + 1) if step > 0 else total_loss
         print(f"Epoch {epoch + 1} finished. Average Loss: {avg_loss:.4f}")
 
         if args.max_steps and global_step >= args.max_steps:
             break
 
     print("\nTraining finished.")
-    save_checkpoint(model, args.epochs - 1, global_step, args)
+    # Final save based on the last window of losses
+    final_loss = (sum(save_loss_window) / len(save_loss_window)) if save_loss_window else float('inf')
+    if final_loss < best_loss:
+        print(f"Final loss {final_loss:.4f} is better than best loss {best_loss:.4f}. Saving final model.")
+        best_loss = final_loss
+    else:
+        print(f"Final loss {final_loss:.4f} is not better than best loss {best_loss:.4f}. Saving with last best loss.")
+    save_checkpoint(model, optimizer, args.epochs - 1, global_step, best_loss, last_avg_loss, args)
 
 
 if __name__ == "__main__":

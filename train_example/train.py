@@ -1,249 +1,270 @@
-import argparse
-import json
-import os
-import re
-import shutil
-from dataclasses import dataclass
-
 import mlx.core as mx
+from mlx.core import save_safetensors
 import mlx.nn as nn
 import mlx.optimizers as optim
-import sentencepiece as spm
-from datasets import load_dataset
-from mlx.core import save_safetensors
 from mlx.utils import tree_flatten
-import sys
-from tqdm import tqdm
+from datasets import load_dataset, load_from_disk
+import json
+import os
+from dataclasses import dataclass
+import sentencepiece as spm
+from tqdm import tqdm # Import tqdm
+import shutil
+import re
 
-# Import ModelArgs and Model from gemma3.py (do not modify gemma3.py)
+# Import ModelArgs and GeminiNano from gemini_nano.py
 from gemma3 import ModelArgs, Model
 
-
-def get_args():
-    """Parse command line arguments with default values."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    default_model_dir = os.path.join(script_dir, "model_gemma3_3B")
-
-    parser = argparse.ArgumentParser(description="Train a Gemma-3 model with MLX.")
-    parser.add_argument("--model-dir", type=str, default=default_model_dir,
-                        help="Directory to save/load model and tokenizer.")
-    parser.add_argument("--batch-size", type=int, default=8, help="Batch size for training.")
-    parser.add_argument("--seq-len", type=int, default=256, help="Sequence length for training.")
-    parser.add_argument("--lr", type=float, default=1e-6, help="Learning rate.") # Further reduced LR
-    parser.add_argument("--epochs", type=int, default=2, help="Number of training epochs.")
-    parser.add_argument("--save-every", type=int, default=5, help="Save a checkpoint every N steps.")
-    parser.add_argument("--fresh-start", action="store_true", default=False, # Set fresh-start to True by default
-                        help="Force training from scratch, ignoring existing checkpoints.")
-    parser.add_argument("--max-steps", type=int, default=0, help="Maximum number of training steps. Overrides epochs.")
-    parser.add_argument("--num-train-examples", type=int, default=None, help="Number of training examples to use. If None, uses all available.")
-    return parser.parse_args()
+# Configuration
+DATA_CACHE_DIR = "./gemma3_3B_korean_realqa_reasoning"
+batch_size = 4
+seq_len = 128
+learning_rate = 1e-5
+num_epochs = 1
+checkpoint_dir = "./gemma3_3B_korean_realqa_reasoning"
+MODEL_TYPE = "gemma3"
+GEMINI_NANO_ARGS = {}
+GEMMA3_ARGS = {"model_type": "gemma3"}
 
 
-def get_tokenizer(model_dir: str):
-    """Load the SentencePiece tokenizer."""
-    tokenizer_path = os.path.join(model_dir, "tokenizer.model")
-    if not os.path.exists(tokenizer_path):
-        raise FileNotFoundError(f"Tokenizer not found at {tokenizer_path}. Please ensure it exists.")
-    tokenizer = spm.SentencePieceProcessor(model_file=tokenizer_path)
-    return tokenizer
 
+# Data Preprocessing Function
+def strip_html_tags(text):
+    """Removes HTML tags from a string."""
+    clean = re.compile('<.*?>')
+    return re.sub(clean, '', text)
 
-def load_dataset_and_preprocess(args, tokenizer, seq_len: int):
-    """Download and preprocess the KorQuAD dataset."""
-    print("Loading and preprocessing dataset...")
-    try:
-        dataset = load_dataset("kmgme/KorQuADv2_1", split="train")
-    except Exception as e:
-        print(f"Failed to load dataset: {e}")
-        return None
+def tokenize_and_prepare_example(example, sp_model, seq_len):
+    text = example['text']
+    input_ids = sp_model.encode(text)
+    pad_token_id = sp_model.pad_id()
+    if pad_token_id == -1:
+        pad_token_id = 0
+    target_ids = input_ids[1:] + [pad_token_id]
+    input_ids = input_ids[:seq_len]
+    target_ids = target_ids[:seq_len]
+    while len(input_ids) < seq_len:
+        input_ids.append(pad_token_id)
+        target_ids.append(pad_token_id)
+    return {"input_ids": input_ids, "target_ids": target_ids}
 
-    def strip_html_tags(text: str) -> str:
-        """Removes HTML tags from a string."""
-        return re.sub(re.compile('<.*?>'), '', text)
-
-    def tokenize_fn(example):
-        context = strip_html_tags(example.get('context', ''))
-        question = example.get('question', '')
-        answer = example.get('answers', {}).get('text', [''])[0]
-        
-        full_text = f"{context} {question} {answer}"
-        tokens = tokenizer.encode(full_text)
-        
-        # Add EOS token at the end of the sequence
-        eos_id = tokenizer.eos_id()
-        if eos_id == -1: eos_id = 0 # Fallback if EOS token is not in vocab
-        tokens.append(eos_id)
-
-        # Input and target are the same, shifted by one
-        x = tokens[:-1]
-        y = tokens[1:]
-
-        # Pad or truncate
-        pad_id = tokenizer.pad_id()
-        if pad_id == -1: pad_id = 0
-
-        x = x[:seq_len] + [pad_id] * (seq_len - len(x))
-        y = y[:seq_len] + [pad_id] * (seq_len - len(y))
-        
-        return {"input_ids": x, "target_ids": y}
-
-    dataset = dataset.map(tokenize_fn, remove_columns=dataset.column_names)
-    dataset.set_format(type="numpy")
+def save_tokenizer_files(checkpoint_dir):
+    """Saves tokenizer files to the specified directory."""
+    tokenizer_model_src = os.path.join(DATA_CACHE_DIR, 'tokenizer.model')
+    tokenizer_vocab_src = os.path.join(DATA_CACHE_DIR, 'tokenizer.vocab')
     
-    if args.num_train_examples is not None:
-        dataset = dataset.select(range(args.num_train_examples))
-        print(f"Using {len(dataset)} training examples.")
+    tokenizer_model_dest = os.path.join(checkpoint_dir, 'tokenizer.model')
+    tokenizer_vocab_dest = os.path.join(checkpoint_dir, 'tokenizer.vocab')
 
-    return dataset
-
-
-def load_model_and_state(args, tokenizer):
-    """Initialize or load a model and its training state."""
-    model_path = os.path.join(args.model_dir, "model.safetensors")
-    state_path = os.path.join(args.model_dir, "training_state.json")
-
-    # ModelArgs from gemma3.py
-    # vocab_size is dynamically set from the tokenizer
-    model_args = ModelArgs(vocab_size=tokenizer.get_piece_size(), model_type='gemma3')
-    model = Model(model_args)
-    optimizer = optim.Adam(learning_rate=args.lr)
-
-    start_epoch = 0
-    start_step = 0
-
-    if not args.fresh_start and os.path.exists(model_path):
-        print(f"Found existing checkpoint. Loading model from {model_path}...")
-        try:
-            model.load_weights(model_path)
-            if os.path.exists(state_path):
-                with open(state_path, 'r') as f:
-                    state = json.load(f)
-                    start_epoch = state.get("epoch", 0)
-                    start_step = state.get("step", 0)
-                print(f"Resuming training from Epoch {start_epoch + 1}, Step {start_step + 1}")
-            else:
-                print("Warning: Model weights found, but no training state. Starting from beginning of epoch.")
-        except Exception as e:
-            print(f"Error loading weights: {e}. Starting from scratch.")
-            start_epoch, start_step = 0, 0
+    if os.path.exists(tokenizer_model_src) and os.path.exists(tokenizer_vocab_src):
+        shutil.copy(tokenizer_model_src, tokenizer_model_dest)
+        shutil.copy(tokenizer_vocab_src, tokenizer_vocab_dest)
     else:
-        print("No checkpoint found or fresh start requested. Initializing new model.")
+        pass
 
-    mx.eval(model.parameters()) # Ensure parameters are initialized
-
-    # Calculate and print model parameter count
-    total_params = sum(p.size for _, p in tree_flatten(model.parameters()))
-    print(f"Model initialized with approximately {total_params / 1_000_000_000:.2f} Billion parameters.")
-
-    return model, optimizer, start_epoch, start_step
-
-
-def save_checkpoint(model, epoch, step, args):
-    """Save model and training state."""
-    os.makedirs(args.model_dir, exist_ok=True)
-    model_path = os.path.join(args.model_dir, "model.safetensors")
-    state_path = os.path.join(args.model_dir, "training_state.json")
-
-    print(f"\nSaving checkpoint at Epoch {epoch+1}, Step {step+1}...")
-    save_safetensors(model_path, dict(tree_flatten(model.parameters())))
-    
-    with open(state_path, 'w') as f:
-        json.dump({"epoch": epoch, "step": step}, f)
-    print("Checkpoint saved.")
-
-
-def train_step(model, optimizer, x, y, pad_token_id):
-    @mx.compile
-    def loss_fn(params, x, y):
-        """Calculate the loss, ignoring padding."""
-        model.update(params)
+# Training function
+def train_step(model, optimizer, x, y, tokenizer):
+    def loss_fn(model, x, y, tokenizer):
         logits = model(x)
-        logits = logits.astype(mx.float32)
-        logits = logits.reshape(-1, model.args.vocab_size)
+        # Reshape for cross_entropy: (batch_size * seq_len, vocab_size)
+        # y: (batch_size * seq_len)
+        logits = logits.reshape(-1, logits.shape[-1])
         y = y.reshape(-1)
-        mask = (y != pad_token_id).astype(mx.float32)
-        loss = nn.losses.cross_entropy(logits, y, reduction="none")
-        masked_loss = loss * mask
-        return mx.sum(masked_loss) / (mx.sum(mask) + 1e-9)
 
-    loss, grads = mx.value_and_grad(loss_fn, argnums=0)(model.parameters(), x, y)
-    optim.clip_grad_norm(grads, 1.0)
+        # Calculate cross-entropy loss for all tokens
+        loss_per_token = nn.losses.cross_entropy(logits, y, reduction="none")
+
+        # Create a mask to ignore padding tokens
+        pad_token_id = tokenizer.pad_id()
+        if pad_token_id == -1:
+            pad_token_id = 0 # Fallback
+        mask = (y != pad_token_id).astype(mx.float32)
+
+        # Apply the mask to the loss
+        masked_loss = loss_per_token * mask
+
+        # Calculate the mean loss only over non-padding tokens
+        # Avoid division by zero if there are no non-padding tokens
+        num_non_padding_tokens = mx.sum(mask)
+        if num_non_padding_tokens > 0:
+            return mx.sum(masked_loss) / num_non_padding_tokens
+        else:
+            return mx.array(0.0) # Return 0 loss if no non-padding tokens
+
+    loss, grads = mx.value_and_grad(loss_fn)(model, x, y, tokenizer)
     optimizer.update(model, grads)
     return loss
 
-
+# Main training loop
 def main():
-    args = get_args()
-    
+    import argparse
+    parser = argparse.ArgumentParser(description="Train a Gemma 3 model.")
+    parser.add_argument("--fresh-start", action="store_true", help="Start training from scratch, ignoring existing checkpoints.")
+    args = parser.parse_args()
+    print("Loading tokenizer...")
+    tokenizer_path = os.path.join(DATA_CACHE_DIR, 'tokenizer.model')
+    if not os.path.exists(tokenizer_path):
+        print(f"Error: tokenizer.model not found at {tokenizer_path}. Please run prepare_dataset.py first.")
+        return
+
+    tokenizer = spm.SentencePieceProcessor(model_file=tokenizer_path)
+    vocab_size = tokenizer.get_piece_size()
+    vocab_size = 262400 # <--- Manually set to match the saved model's vocab size
+    print(f"Tokenizer loaded from json. Vocabulary size: {vocab_size}")
+
+    print("Loading dataset...")
     try:
-        tokenizer = get_tokenizer(args.model_dir)
-        print(f"Tokenizer loaded. Vocab size: {tokenizer.get_piece_size()}")
-    except FileNotFoundError as e:
-        print(e)
+        # Load from local disk
+        dataset = load_from_disk("./data/korean_textbooks_qa")
+    except Exception as e:
+        print(f"Error loading dataset: {e}.")
         return
 
-    model, optimizer, start_epoch, start_step = load_model_and_state(args, tokenizer)
-    dataset = load_dataset_and_preprocess(args, tokenizer, args.seq_len)
-    if dataset is None:
-        return
+    print("Preprocessing dataset...")
+    tokenized_dataset = dataset.map(
+        lambda example: tokenize_and_prepare_example(example, tokenizer, seq_len),
+        remove_columns=['text'],
+        batched=False  # Process one example at a time
+    )
+    tokenized_dataset.set_format(type="numpy", columns=["input_ids", "target_ids"])
 
-    pad_id = tokenizer.pad_id()
-    if pad_id == -1: pad_id = 0
+    train_data = tokenized_dataset["train"]
+    # validation_data = tokenized_dataset["validation"] # Not using validation for this simple script
+    print(f"Dataset preprocessed. Training examples: {len(train_data)}")
 
-    print("\nStarting training...")
-    global_step = 0
-    for epoch in range(start_epoch, args.epochs):
-        print(f"Epoch {epoch + 1}/{args.epochs}")
+    # Import model based on MODEL_TYPE
+    if MODEL_TYPE == "gemini_nano":
+        from gemini_nano import ModelArgs, GeminiNano as ModelClass
+        model_args_dict = GEMINI_NANO_ARGS
+    elif MODEL_TYPE == "gemma3":
+        from gemma3 import ModelArgs, Model as ModelClass
+        model_args_dict = GEMMA3_ARGS
+    else:
+        raise ValueError(f"Unknown MODEL_TYPE: {MODEL_TYPE}")
 
-        num_batches = len(dataset) // args.batch_size
-        total_loss = 0 # Initialize total loss for the epoch
+    # Initialize start_epoch and start_step
+    start_epoch = 0
+    start_step = 0
+
+    # Check for existing model and training state
+    model_path = os.path.join(checkpoint_dir, "model.safetensors")
+    state_path = os.path.join(checkpoint_dir, "training_state.json")
+
+    if not args.fresh_start and os.path.exists(model_path):
+        print(f"Loading pre-trained model from {model_path}...")
+        try:
+            # Model initialization
+            print("Initializing model...\n")
+            model_args = ModelArgs(vocab_size=vocab_size, **model_args_dict)
+            model = ModelClass(model_args)
+            mx.eval(model.parameters())  # Initialize parameters
+            print("Model initialized.\n")
+
+            model.load_weights(model_path)
+            if os.path.exists(state_path):
+                with open(state_path, 'r') as f:
+                    training_state = json.load(f)
+                    start_epoch = training_state.get("epoch", 0)
+                    start_step = training_state.get("step", 0)
+                print(f"Resuming training from Epoch {start_epoch + 1}, Step {start_step + 1}")
+            else:
+                print("No training state found. Starting from Epoch 1, Step 1.")
+        except ValueError as e:
+            print(f"Error loading pre-trained model: {e}")
+            print("Model structure mismatch. Starting training from scratch.")
+            # Clean up problematic files to ensure a fresh start
+            # if os.path.exists(model_path):
+            #     os.remove(model_path)
+            # if os.path.exists(state_path):
+            #     os.remove(state_path)
+            print("INFO: Previous checkpoint files will not be deleted.")
+            start_epoch = 0
+            start_step = 0
+
+            # Model initialization (fresh start)
+            print("Initializing model...\n")
+            model_args = ModelArgs(vocab_size=vocab_size, **model_args_dict)
+            model = ModelClass(model_args)
+            mx.eval(model.parameters())  # Initialize parameters
+            print("Model initialized.\n")
+    else:
+        print("No pre-trained model found. Starting training from scratch.")
+        # Model initialization (fresh start)
+        print("Initializing model...\n")
+        model_args = ModelArgs(vocab_size=vocab_size, **model_args_dict)
+        model = ModelClass(model_args)
+        mx.eval(model.parameters())  # Initialize parameters
+        print("Model initialized.\n")
+
+    optimizer = optim.Adam(learning_rate=learning_rate)
+
+    # Training loop
+    print("Starting training...\n")
+
+    for epoch in range(start_epoch, num_epochs):
+        print(f"Epoch {epoch + 1}/{num_batches}")
+        
+        # Shuffle and batch data
+        indices = mx.array(mx.arange(len(train_data)))
+        indices = mx.random.permutation(indices)
+
+        total_loss = 0
+        
         # Determine the starting step for the current epoch.
         # This is only relevant for the very first epoch of a resumed run.
-        current_epoch_start_step = start_step if epoch == start_epoch else 0
+        first_step_to_process = 0
+        if epoch == start_epoch and start_step > 0:
+            # Resume from the step *after* the last completed one.
+            first_step_to_process = start_step + 1
 
-        pbar = tqdm(range(current_epoch_start_step, num_batches), 
-                    desc=f"Epoch {epoch+1}", 
-                    initial=current_epoch_start_step, 
-                    total=num_batches)
-        
-        for step in pbar:
-            # Data loading
-            start_idx = step * args.batch_size
-            batch = dataset[start_idx : start_idx + args.batch_size]
-            x = mx.array(batch["input_ids"])
-            y = mx.array(batch["target_ids"])
+        # Setup progress bar
+        num_batches = len(train_data) // batch_size
+        pbar = tqdm(range(first_step_to_process, num_batches), desc=f"Epoch {epoch + 1}", initial=first_step_to_process, total=num_batches)
 
-            # Training step execution
-            loss = train_step(model, optimizer, x, y, pad_id)
+        # Batch loop
+        for current_step in pbar:
+            i = current_step * batch_size
+            batch_indices = indices[i : i + batch_size]
+            batch_indices_list = batch_indices.tolist()
+            x = mx.array(train_data[batch_indices_list]["input_ids"])
+            y = mx.array(train_data[batch_indices_list]["target_ids"])
+
+            loss = train_step(model, optimizer, x, y, tokenizer)
             mx.eval(model.parameters(), optimizer.state)
 
-            total_loss += loss.item() # Accumulate loss
+            total_loss += loss.item()
             pbar.set_postfix(loss=f"{loss.item():.4f}")
-            pbar.refresh()
-            global_step += 1
 
-            # Save checkpoint
-            if (step + 1) % args.save_every == 0:
-                save_checkpoint(model, epoch, step, args)
-            
-            if args.max_steps and global_step >= args.max_steps:
-                print(f"\nReached max steps ({args.max_steps}). Finishing training.")
-                break
+            # Save checkpoint every 5 steps
+            if current_step > 0 and current_step % 2 == 0:
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                checkpoint_path = os.path.join(checkpoint_dir, "model.safetensors")
+                save_safetensors(checkpoint_path, dict(tree_flatten(model.parameters())))
+                save_tokenizer_files(checkpoint_dir)
+                
+                # Save training state
+                state_path = os.path.join(checkpoint_dir, "training_state.json")
+                with open(state_path, 'w') as f:
+                    json.dump({'epoch': epoch, 'step': current_step}, f)
         
-        # Calculate average loss for the epoch
-        avg_loss = total_loss / num_batches
+        # Reset start_step after the first epoch
+        start_step = 0
+            
+        # Calculate average loss using the total number of batches from tqdm
+        avg_loss = total_loss / (len(train_data) / batch_size) # Use actual number of batches
         print(f"Epoch {epoch + 1} finished. Average Loss: {avg_loss:.4f}")
 
-        # Reset start_step for subsequent epochs
-        start_step = 0
+        # Save checkpoint at the end of the epoch
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        checkpoint_path = os.path.join(checkpoint_dir, "model.safetensors")
+        save_safetensors(checkpoint_path, dict(tree_flatten(model.parameters())))
 
-        if args.max_steps and global_step >= args.max_steps:
-            break
+        save_tokenizer_files(checkpoint_dir)
 
-    print("\nTraining finished.")
-    # Final model save
-    save_checkpoint(model, args.epochs - 1, num_batches - 1, args)
-
+        # Save training state
+        state_path = os.path.join(checkpoint_dir, "training_state.json")
+        with open(state_path, 'w') as f:
+            json.dump({'epoch': epoch + 1, 'step': 0}, f) # Save next epoch, step 0
 
 if __name__ == "__main__":
     main()
