@@ -26,3 +26,4 @@ Qwen/Qwen3-0.6B-MLX-4bit
 /train_example/*.gguf/
 
 /webserver/__pycache__/
+temp-mlx-examples/
