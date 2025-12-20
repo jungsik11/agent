@@ -24,6 +24,7 @@ Qwen/Qwen3-0.6B-MLX-4bit
 /train_example/data/
 /train_example/model/
 /train_example/*.gguf/
+/train_example/qwen3_moe_1B_korean/
 
 /webserver/__pycache__/
 temp-mlx-examples/
